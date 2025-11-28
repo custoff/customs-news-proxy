@@ -1,16 +1,14 @@
 const axios = require('axios');
 
-// 1. [설정] 키워드 및 점수 규칙
+// 1. [설정] gNUsead 키워드 및 점수 규칙
 const RULES = {
-  // 검색어 (쿼리가 없을 때 사용)
-  SEARCH_QUERY: "관세청|세관|통관|마약밀수|무역안보|관세행정|해외직구",
+  // 공백이나 특수문자 오류를 방지하기 위해 간단한 형태로 수정
+  SEARCH_QUERY: "관세청|세관|통관|마약밀수|무역안보|관세행정",
   
-  // 점수판
   SCORES: { TOP_TITLE: 6, TOP_BODY: 3, SUB_TITLE: 4, SUB_BODY: 2 },
   
-  // 키워드 목록
-  TOP_KEYWORDS: ["이명구", "관세청", "관세청장", "관세행정", "이종욱", "고광효"],
-  SUB_KEYWORDS: ["세관", "통관", "수출", "수입", "FTA", "원산지", "마약", "조사", "심사", "적발", "밀수", "AI", "혁신", "직구", "특송"],
+  TOP_KEYWORDS: ["이명구", "관세청", "관세청장", "관세행정", "이종욱"],
+  SUB_KEYWORDS: ["세관", "통관", "수출", "수입", "FTA", "원산지", "마약", "조사", "심사", "적발", "밀수", "AI", "혁신"],
   EXCLUDE_KEYWORDS: ["노동자", "백해룡", "임은정", "합수팀", "국수본", "김건희"],
   MUST_HAVE_KEYWORDS: ["관세청", "세관", "관세", "통관"]
 };
@@ -20,11 +18,9 @@ function calculateScore(title, description) {
   let score = 0;
   const content = (title + " " + description);
 
-  // 제외 키워드 체크 (-1점 = 탈락)
   for (const kw of RULES.EXCLUDE_KEYWORDS) {
     if (content.includes(kw)) return -1;
   }
-  // 필수 키워드 체크
   const hasMustHave = RULES.MUST_HAVE_KEYWORDS.some(kw => content.includes(kw));
   if (!hasMustHave) return -1;
 
@@ -40,36 +36,37 @@ function calculateScore(title, description) {
   return score;
 }
 
-// 3. [함수] 날짜 필터 (최근 7일로 확대)
+// 3. [함수] 날짜 필터 (오늘/어제)
 function isRecentNews(pubDateString) {
   const pubDate = new Date(pubDateString);
   const now = new Date();
-  
-  // [수정 포인트] 주말/공휴일 대비 7일 전 뉴스까지 허용
-  const cutoffDate = new Date(now);
-  cutoffDate.setDate(now.getDate() - 7); 
-  cutoffDate.setHours(0, 0, 0, 0);
-
-  return pubDate >= cutoffDate;
+  // 어제 0시 0분부터 허용
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  yesterday.setHours(0, 0, 0, 0);
+  return pubDate >= yesterday;
 }
 
 // 4. 메인 핸들러
 exports.handler = async function(event, context) {
   try {
+    // [중요 수정] 파라미터 안전 처리 (undefined 방지)
     const params = event.queryStringParameters || {};
     let query = params.query;
 
+    // 검색어가 없거나 비어있으면 기본값 강제 적용
     if (!query || query.trim() === "") {
       query = RULES.SEARCH_QUERY;
     }
 
     const apiURL = 'https://openapi.naver.com/v1/search/news.json';
     
+    // 네이버 API 호출
     const response = await axios.get(apiURL, {
       params: {
         query: query,
-        display: 100, // 100개 스캔
-        sort: 'date'  // 최신순
+        display: 100,
+        sort: 'date'
       },
       headers: {
         'X-Naver-Client-Id': process.env.NAVER_CLIENT_ID,
@@ -77,13 +74,20 @@ exports.handler = async function(event, context) {
       }
     });
 
+    // 검색 결과가 0건이면 바로 반환 (GPT에게 상황 설명용)
     if (response.data.total === 0) {
       return {
         statusCode: 200,
-        body: JSON.stringify({ items: [], message: "검색 결과 없음" })
+        body: JSON.stringify({
+          total_scanned: 0,
+          filtered_count: 0,
+          items: [],
+          message: "네이버 검색 결과가 0건입니다. 검색어: " + query
+        })
       };
     }
 
+    // 데이터 정제 및 채점
     let processedItems = response.data.items.map(item => {
       const cleanTitle = item.title.replace(/<[^>]*>?|&quot;|&#39;/gm, '');
       const cleanDesc = item.description.replace(/<[^>]*>?|&quot;|&#39;/gm, '');
@@ -96,14 +100,14 @@ exports.handler = async function(event, context) {
       };
     });
 
-    // 필터링 적용
+    // 필터링
     processedItems = processedItems.filter(item => {
       if (item.score === -1) return false;
-      if (!isRecentNews(item.pubDate)) return false; // 7일 이내만 통과
+      if (!isRecentNews(item.pubDate)) return false;
       return true;
     });
 
-    // 정렬 (점수 높은 순)
+    // 정렬 (점수순)
     processedItems.sort((a, b) => b.score - a.score);
 
     // 상위 15개 반환
@@ -120,6 +124,10 @@ exports.handler = async function(event, context) {
     };
 
   } catch (error) {
-    return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
+    console.error("Error:", error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: "Server Error: " + error.message })
+    };
   }
 };
